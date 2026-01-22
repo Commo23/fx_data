@@ -85,21 +85,6 @@ const Index = () => {
             </Tabs>
           )}
           
-          {/* Footer */}
-          <footer className="text-center text-sm text-muted-foreground py-8 border-t border-border">
-            <p>
-              Données provenant de{' '}
-              <a 
-                href="https://www.barchart.com/futures/currencies" 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="text-primary hover:underline"
-              >
-                Barchart
-              </a>
-              . Les prix peuvent être différés.
-            </p>
-          </footer>
         </div>
       </main>
     </div>
