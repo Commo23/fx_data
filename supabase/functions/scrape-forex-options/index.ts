@@ -1,3 +1,11 @@
+// Deno types for Supabase Edge Functions
+declare const Deno: {
+  serve: (handler: (req: Request) => Promise<Response> | Response) => void;
+  env: {
+    get: (key: string) => string | undefined;
+  };
+};
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
