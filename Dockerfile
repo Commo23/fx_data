@@ -36,11 +36,14 @@ RUN apt-get update && \
 COPY package*.json ./
 COPY .npmrc ./
 
-# Install dependencies (postinstall will install Playwright browsers)
-RUN npm ci --prefer-offline --no-audit
+# Install dependencies (ignore postinstall script to avoid Playwright install on Vercel)
+RUN npm ci --prefer-offline --no-audit --ignore-scripts
 
 # Copy source code
 COPY . .
+
+# Install Playwright browsers (only for server, not needed for frontend)
+RUN npx playwright install chromium || echo "Playwright installation failed, continuing..."
 
 # Expose port (Railway will set PORT env var)
 EXPOSE 3001
