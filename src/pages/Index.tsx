@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { DashboardHeader } from '@/components/DashboardHeader';
 import { CurrencySelector, CURRENCIES } from '@/components/CurrencySelector';
 import { FuturesContractsTable } from '@/components/FuturesContractsTable';
@@ -13,6 +13,14 @@ const Index = () => {
   const [activeTab, setActiveTab] = useState<'futures' | 'options'>('futures');
   
   const { data: contracts, isLoading, isFetching, isError, error, dataUpdatedAt } = useCurrencyFutures(selectedCurrency);
+
+  // Debug: Log environment variables
+  useEffect(() => {
+    console.log('Supabase Config:', {
+      url: import.meta.env.VITE_SUPABASE_URL ? '✓ Configured' : '✗ Missing',
+      key: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ? '✓ Configured' : '✗ Missing',
+    });
+  }, []);
 
   const handleRefresh = () => {
     if (selectedCurrency) {

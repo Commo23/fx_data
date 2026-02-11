@@ -1,8 +1,0 @@
-# Force Node.js 20 for Railway
-# Railway will detect Node.js 20 from .nvmrc or .node-version files
-
-[phases.install]
-cmds = ["npm ci --prefer-offline --no-audit"]
-
-[start]
-cmd = "npm run server"

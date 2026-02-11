@@ -267,81 +267,48 @@ export async function scrapeForexOptions(req: Request, res: Response) {
               // Find all tables
               const tables = Array.from(document.querySelectorAll('table'));
               
-              // Helper function to find text in a wider context around an element
-              function findTypeInContext(element: Element, maxDistance: number = 30): 'C' | 'P' | null {
-                const visited = new Set<Element>();
-                const queue: Array<{ element: Element; distance: number }> = [{ element, distance: 0 }];
-                
-                // Also check for headings (h1-h6) near the table
-                const allHeadings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6'));
-                for (const heading of allHeadings) {
-                  const headingText = heading.textContent?.toLowerCase() || '';
-                  const headingRect = heading.getBoundingClientRect();
-                  const tableRect = element.getBoundingClientRect();
-                  
-                  // Check if heading is near the table (within 500px vertically)
-                  if (Math.abs(headingRect.top - tableRect.top) < 500) {
-                    if (headingText.includes('puts') || (headingText.includes('put') && !headingText.includes('call'))) {
-                      return 'P';
-                    }
-                    if (headingText.includes('calls') || (headingText.includes('call') && !headingText.includes('put'))) {
-                      return 'C';
-                    }
-                  }
-                }
-                
-                while (queue.length > 0) {
-                  const { element: current, distance } = queue.shift()!;
-                  if (visited.has(current) || distance > maxDistance) continue;
-                  visited.add(current);
-                  
-                  const text = current.textContent?.toLowerCase() || '';
-                  
-                  // Check for "Puts" (plural) - more specific
-                  if (text.includes('puts') || (text.includes('put') && !text.includes('input') && !text.includes('output'))) {
-                    // Make sure it's not just "call" with "put" somewhere else
-                    const hasCall = text.includes('call');
-                    const putIndex = text.indexOf('put');
-                    const callIndex = text.indexOf('call');
-                    
-                    // If "put" appears before "call" or there's no "call", it's likely a Put table
-                    if (!hasCall || (putIndex !== -1 && callIndex !== -1 && putIndex < callIndex)) {
-                      return 'P';
-                    }
-                  }
-                  
-                  // Check for "Calls" (plural) or "Call"
-                  if (text.includes('calls') || (text.includes('call') && !text.includes('put'))) {
-                    return 'C';
-                  }
-                  
-                  // Add siblings and parent to queue
-                  if (current.previousElementSibling) {
-                    queue.push({ element: current.previousElementSibling, distance: distance + 1 });
-                  }
-                  if (current.nextElementSibling) {
-                    queue.push({ element: current.nextElementSibling, distance: distance + 1 });
-                  }
-                  if (current.parentElement) {
-                    queue.push({ element: current.parentElement, distance: distance + 1 });
-                  }
-                }
-                
-                return null;
-              }
-              
               for (const table of tables) {
-                // First, try to determine table type from context
-                let tableType: 'C' | 'P' | null = findTypeInContext(table, 20);
+                // Check context before table (look for "Call" or "Put" text)
+                let tableType: 'C' | 'P' | null = null;
+                let element: Element | null = table.previousElementSibling;
+                let checkCount = 0;
+                
+                // Check previous siblings for "Call" or "Put" indicators
+                while (element && checkCount < 10) {
+                  const text = element.textContent?.toLowerCase() || '';
+                  if (text.includes('call') && !text.includes('put')) {
+                    tableType = 'C';
+                    break;
+                  } else if (text.includes('put') && !text.includes('call')) {
+                    tableType = 'P';
+                    break;
+                  }
+                  element = element.previousElementSibling;
+                  checkCount++;
+                }
+                
+                // Also check parent elements
+                if (!tableType) {
+                  let parent: Element | null = table.parentElement;
+                  checkCount = 0;
+                  while (parent && checkCount < 5) {
+                    const text = parent.textContent?.toLowerCase() || '';
+                    if (text.includes('call') && !text.includes('put')) {
+                      tableType = 'C';
+                      break;
+                    } else if (text.includes('put') && !text.includes('call')) {
+                      tableType = 'P';
+                      break;
+                    }
+                    parent = parent.parentElement;
+                    checkCount++;
+                  }
+                }
                 
                 // Parse table rows
                 const rows = Array.from(table.querySelectorAll('tr'));
                 let headerFound = false;
                 let headerIndexes: Record<string, number> = {};
-                
-                // Count Put vs Call in table cells to help determine type
-                let putCountInTable = 0;
-                let callCountInTable = 0;
                 
                 for (const row of rows) {
                   const cells = Array.from(row.querySelectorAll('th, td')).map(cell => 
@@ -374,42 +341,16 @@ export async function scrapeForexOptions(req: Request, res: Response) {
                     const latest = cells[headerIndexes.latest] || cells[2];
                     const iv = cells[headerIndexes.iv] || cells[3];
                     
-                    // Count Put/Call in cells
-                    if (typeCell) {
-                      const typeUpper = typeCell.toUpperCase();
-                      if (typeUpper.includes('PUT') || typeUpper === 'P') {
-                        putCountInTable++;
-                      } else if (typeUpper.includes('CALL') || typeUpper === 'C') {
-                        callCountInTable++;
-                      }
-                    }
-                    
                     if (strike && latest && iv) {
-                      // Determine type: prefer typeCell, then tableType, then count-based detection
-                      let type: 'C' | 'P' = 'C'; // default
-                      
+                      // Determine type
+                      let type: 'C' | 'P' = tableType || 'C';
                       if (typeCell) {
                         const typeUpper = typeCell.toUpperCase();
-                        if (typeUpper.includes('PUT') || typeUpper === 'P' || typeUpper.startsWith('P')) {
-                          type = 'P';
-                        } else if (typeUpper.includes('CALL') || typeUpper === 'C' || typeUpper.startsWith('C')) {
+                        if (typeUpper.includes('CALL') || typeUpper === 'C' || typeUpper.startsWith('C')) {
                           type = 'C';
-                        }
-                      }
-                      
-                      // If typeCell doesn't help, use tableType or count-based detection
-                      if (!typeCell || type === 'C') {
-                        // If we have a clear tableType from context, use it
-                        if (tableType) {
-                          type = tableType;
-                        } 
-                        // Otherwise, use count-based detection (but only if we have enough data)
-                        else if (putCountInTable > callCountInTable && putCountInTable > 0) {
+                        } else if (typeUpper.includes('PUT') || typeUpper === 'P' || typeUpper.startsWith('P')) {
                           type = 'P';
-                        } else if (callCountInTable > putCountInTable && callCountInTable > 0) {
-                          type = 'C';
                         }
-                        // If counts are equal or both zero, keep default 'C' but log for debugging
                       }
                       
                       // Filter by targetType if specified
@@ -417,25 +358,6 @@ export async function scrapeForexOptions(req: Request, res: Response) {
                       
                       options.push({ strike, type, latest, iv });
                     }
-                  }
-                }
-                
-                // After parsing, if we still don't have a tableType, use count-based detection
-                if (!tableType && (putCountInTable > 0 || callCountInTable > 0)) {
-                  if (putCountInTable > callCountInTable) {
-                    tableType = 'P';
-                    // Update all options from this table that don't have a clear type
-                    const tableOptions = options.filter((opt, idx) => {
-                      // Find options that came from this table (last options added)
-                      return idx >= options.length - (putCountInTable + callCountInTable);
-                    });
-                    tableOptions.forEach(opt => {
-                      if (!opt.type || opt.type === 'C') {
-                        opt.type = 'P';
-                      }
-                    });
-                  } else if (callCountInTable > putCountInTable) {
-                    tableType = 'C';
                   }
                 }
               }
@@ -457,56 +379,59 @@ export async function scrapeForexOptions(req: Request, res: Response) {
               console.log('Found Barchart API response, extracting options...');
               console.log('JSON data structure:', JSON.stringify(jsonData).substring(0, 500));
               
-              // Barchart API structure: { data: { [symbol]: { list: { [listName]: [...] } } } }
-              if (jsonData?.data) {
-                for (const symbolKey of Object.keys(jsonData.data)) {
-                  const symbolData = jsonData.data[symbolKey];
-                  if (symbolData && typeof symbolData === 'object') {
-                    // Check for list property
-                    if (symbolData.list && typeof symbolData.list === 'object') {
-                      for (const listKey of Object.keys(symbolData.list)) {
-                        const listData = symbolData.list[listKey];
-                        if (Array.isArray(listData)) {
-                          console.log(`Found ${listData.length} options in list: ${listKey}`);
-                          optionsFromJson = listData;
-                          break;
-                        }
-                      }
-                    }
-                    // Also check direct array
-                    if (Array.isArray(symbolData)) {
-                      optionsFromJson = symbolData;
-                    } else if (symbolData.options && Array.isArray(symbolData.options)) {
-                      optionsFromJson = symbolData.options;
-                    } else if (symbolData.data && Array.isArray(symbolData.data)) {
-                      optionsFromJson = symbolData.data;
+              // Barchart API structure: { data: { Call: [...], Put: [...] } } — merge both lists with correct type
+              if (jsonData?.data && typeof jsonData.data === 'object') {
+                const data = jsonData.data;
+                // data may be { Call: [...], Put: [...] } (list name = option type)
+                const listNames = Object.keys(data);
+                for (const listName of listNames) {
+                  const listData = data[listName];
+                  if (!Array.isArray(listData)) continue;
+                  const listType: 'C' | 'P' = (listName.toLowerCase() === 'call') ? 'C' : 'P';
+                  console.log(`Found ${listData.length} options in list: ${listName}`);
+                  for (const opt of listData) {
+                    const strike = String(opt.strikePrice ?? opt.strike ?? '').trim();
+                    const latest = String(opt.lastPrice ?? opt.last ?? opt.price ?? '').trim();
+                    const iv = String(opt.optImpliedVolatility ?? opt.impliedVolatility ?? opt.iv ?? '').trim();
+                    if (strike && latest) {
+                      optionsFromJson.push({
+                        strike,
+                        type: listType,
+                        latest,
+                        iv,
+                      });
                     }
                   }
                 }
               }
               
-              // Also try direct array or data array
-              if (optionsFromJson.length === 0) {
-                if (Array.isArray(jsonData)) {
-                  optionsFromJson = jsonData;
-                } else if (jsonData?.data && Array.isArray(jsonData.data)) {
-                  optionsFromJson = jsonData.data;
-                } else if (jsonData?.options && Array.isArray(jsonData.options)) {
-                  optionsFromJson = jsonData.options;
+              // Fallback: old structure { data: { [symbol]: { list: { [listName]: [...] } } } }
+              if (optionsFromJson.length === 0 && jsonData?.data) {
+                for (const symbolKey of Object.keys(jsonData.data)) {
+                  const symbolData = jsonData.data[symbolKey];
+                  if (symbolData?.list && typeof symbolData.list === 'object') {
+                    for (const listKey of Object.keys(symbolData.list)) {
+                      const listData = symbolData.list[listKey];
+                      if (Array.isArray(listData)) {
+                        const listType: 'C' | 'P' = (listKey.toLowerCase() === 'call') ? 'C' : 'P';
+                        for (const opt of listData) {
+                          const strike = String(opt.strikePrice ?? opt.strike ?? '').trim();
+                          const latest = String(opt.lastPrice ?? opt.last ?? opt.price ?? '').trim();
+                          const iv = String(opt.optImpliedVolatility ?? opt.impliedVolatility ?? opt.iv ?? '').trim();
+                          if (strike && latest) {
+                            optionsFromJson.push({ strike, type: listType, latest, iv });
+                          }
+                        }
+                        break;
+                      }
+                    }
+                  }
                 }
               }
               
               if (optionsFromJson.length > 0) {
-                console.log(`Extracted ${optionsFromJson.length} options from Barchart API`);
-                // Transform Barchart API format to our format
-                optionsFromJson = optionsFromJson.map((opt: any) => ({
-                  strike: String(opt.strikePrice || opt.strike || ''),
-                  type: (opt.optionType === 'C' || opt.optionType === 'Call' || (opt.optionType && opt.optionType.toUpperCase().includes('CALL'))) ? 'C' : 'P',
-                  latest: String(opt.lastPrice || opt.last || opt.price || ''),
-                  iv: String(opt.optImpliedVolatility || opt.impliedVolatility || opt.iv || ''),
-                })).filter((opt: any) => opt.strike && opt.latest);
-                console.log(`After transformation: ${optionsFromJson.length} valid options`);
-                break; // Found options, no need to check other responses
+                console.log(`Extracted ${optionsFromJson.length} options from Barchart API (Call + Put)`);
+                break;
               }
             } else {
               // Generic JSON parsing
