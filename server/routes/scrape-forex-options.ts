@@ -267,48 +267,81 @@ export async function scrapeForexOptions(req: Request, res: Response) {
               // Find all tables
               const tables = Array.from(document.querySelectorAll('table'));
               
-              for (const table of tables) {
-                // Check context before table (look for "Call" or "Put" text)
-                let tableType: 'C' | 'P' | null = null;
-                let element: Element | null = table.previousElementSibling;
-                let checkCount = 0;
+              // Helper function to find text in a wider context around an element
+              function findTypeInContext(element: Element, maxDistance: number = 30): 'C' | 'P' | null {
+                const visited = new Set<Element>();
+                const queue: Array<{ element: Element; distance: number }> = [{ element, distance: 0 }];
                 
-                // Check previous siblings for "Call" or "Put" indicators
-                while (element && checkCount < 10) {
-                  const text = element.textContent?.toLowerCase() || '';
-                  if (text.includes('call') && !text.includes('put')) {
-                    tableType = 'C';
-                    break;
-                  } else if (text.includes('put') && !text.includes('call')) {
-                    tableType = 'P';
-                    break;
-                  }
-                  element = element.previousElementSibling;
-                  checkCount++;
-                }
-                
-                // Also check parent elements
-                if (!tableType) {
-                  let parent: Element | null = table.parentElement;
-                  checkCount = 0;
-                  while (parent && checkCount < 5) {
-                    const text = parent.textContent?.toLowerCase() || '';
-                    if (text.includes('call') && !text.includes('put')) {
-                      tableType = 'C';
-                      break;
-                    } else if (text.includes('put') && !text.includes('call')) {
-                      tableType = 'P';
-                      break;
+                // Also check for headings (h1-h6) near the table
+                const allHeadings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6'));
+                for (const heading of allHeadings) {
+                  const headingText = heading.textContent?.toLowerCase() || '';
+                  const headingRect = heading.getBoundingClientRect();
+                  const tableRect = element.getBoundingClientRect();
+                  
+                  // Check if heading is near the table (within 500px vertically)
+                  if (Math.abs(headingRect.top - tableRect.top) < 500) {
+                    if (headingText.includes('puts') || (headingText.includes('put') && !headingText.includes('call'))) {
+                      return 'P';
                     }
-                    parent = parent.parentElement;
-                    checkCount++;
+                    if (headingText.includes('calls') || (headingText.includes('call') && !headingText.includes('put'))) {
+                      return 'C';
+                    }
                   }
                 }
+                
+                while (queue.length > 0) {
+                  const { element: current, distance } = queue.shift()!;
+                  if (visited.has(current) || distance > maxDistance) continue;
+                  visited.add(current);
+                  
+                  const text = current.textContent?.toLowerCase() || '';
+                  
+                  // Check for "Puts" (plural) - more specific
+                  if (text.includes('puts') || (text.includes('put') && !text.includes('input') && !text.includes('output'))) {
+                    // Make sure it's not just "call" with "put" somewhere else
+                    const hasCall = text.includes('call');
+                    const putIndex = text.indexOf('put');
+                    const callIndex = text.indexOf('call');
+                    
+                    // If "put" appears before "call" or there's no "call", it's likely a Put table
+                    if (!hasCall || (putIndex !== -1 && callIndex !== -1 && putIndex < callIndex)) {
+                      return 'P';
+                    }
+                  }
+                  
+                  // Check for "Calls" (plural) or "Call"
+                  if (text.includes('calls') || (text.includes('call') && !text.includes('put'))) {
+                    return 'C';
+                  }
+                  
+                  // Add siblings and parent to queue
+                  if (current.previousElementSibling) {
+                    queue.push({ element: current.previousElementSibling, distance: distance + 1 });
+                  }
+                  if (current.nextElementSibling) {
+                    queue.push({ element: current.nextElementSibling, distance: distance + 1 });
+                  }
+                  if (current.parentElement) {
+                    queue.push({ element: current.parentElement, distance: distance + 1 });
+                  }
+                }
+                
+                return null;
+              }
+              
+              for (const table of tables) {
+                // First, try to determine table type from context
+                let tableType: 'C' | 'P' | null = findTypeInContext(table, 20);
                 
                 // Parse table rows
                 const rows = Array.from(table.querySelectorAll('tr'));
                 let headerFound = false;
                 let headerIndexes: Record<string, number> = {};
+                
+                // Count Put vs Call in table cells to help determine type
+                let putCountInTable = 0;
+                let callCountInTable = 0;
                 
                 for (const row of rows) {
                   const cells = Array.from(row.querySelectorAll('th, td')).map(cell => 
@@ -341,16 +374,42 @@ export async function scrapeForexOptions(req: Request, res: Response) {
                     const latest = cells[headerIndexes.latest] || cells[2];
                     const iv = cells[headerIndexes.iv] || cells[3];
                     
+                    // Count Put/Call in cells
+                    if (typeCell) {
+                      const typeUpper = typeCell.toUpperCase();
+                      if (typeUpper.includes('PUT') || typeUpper === 'P') {
+                        putCountInTable++;
+                      } else if (typeUpper.includes('CALL') || typeUpper === 'C') {
+                        callCountInTable++;
+                      }
+                    }
+                    
                     if (strike && latest && iv) {
-                      // Determine type
-                      let type: 'C' | 'P' = tableType || 'C';
+                      // Determine type: prefer typeCell, then tableType, then count-based detection
+                      let type: 'C' | 'P' = 'C'; // default
+                      
                       if (typeCell) {
                         const typeUpper = typeCell.toUpperCase();
-                        if (typeUpper.includes('CALL') || typeUpper === 'C' || typeUpper.startsWith('C')) {
-                          type = 'C';
-                        } else if (typeUpper.includes('PUT') || typeUpper === 'P' || typeUpper.startsWith('P')) {
+                        if (typeUpper.includes('PUT') || typeUpper === 'P' || typeUpper.startsWith('P')) {
                           type = 'P';
+                        } else if (typeUpper.includes('CALL') || typeUpper === 'C' || typeUpper.startsWith('C')) {
+                          type = 'C';
                         }
+                      }
+                      
+                      // If typeCell doesn't help, use tableType or count-based detection
+                      if (!typeCell || type === 'C') {
+                        // If we have a clear tableType from context, use it
+                        if (tableType) {
+                          type = tableType;
+                        } 
+                        // Otherwise, use count-based detection (but only if we have enough data)
+                        else if (putCountInTable > callCountInTable && putCountInTable > 0) {
+                          type = 'P';
+                        } else if (callCountInTable > putCountInTable && callCountInTable > 0) {
+                          type = 'C';
+                        }
+                        // If counts are equal or both zero, keep default 'C' but log for debugging
                       }
                       
                       // Filter by targetType if specified
@@ -358,6 +417,25 @@ export async function scrapeForexOptions(req: Request, res: Response) {
                       
                       options.push({ strike, type, latest, iv });
                     }
+                  }
+                }
+                
+                // After parsing, if we still don't have a tableType, use count-based detection
+                if (!tableType && (putCountInTable > 0 || callCountInTable > 0)) {
+                  if (putCountInTable > callCountInTable) {
+                    tableType = 'P';
+                    // Update all options from this table that don't have a clear type
+                    const tableOptions = options.filter((opt, idx) => {
+                      // Find options that came from this table (last options added)
+                      return idx >= options.length - (putCountInTable + callCountInTable);
+                    });
+                    tableOptions.forEach(opt => {
+                      if (!opt.type || opt.type === 'C') {
+                        opt.type = 'P';
+                      }
+                    });
+                  } else if (callCountInTable > putCountInTable) {
+                    tableType = 'C';
                   }
                 }
               }
