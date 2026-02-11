@@ -6,6 +6,9 @@ declare const Deno: {
   };
 };
 
+// Import optimized Playwright utilities
+import { scrapeWithPlaywright, scrapeWithFetch, type Page } from '../_shared/playwright-utils.ts';
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -24,6 +27,131 @@ interface FuturesData {
 
 // Month codes for futures contracts
 const MONTH_CODES = 'FGHJKMNQUVXZ';
+
+// Helper function to parse HTML table and extract ALL contracts
+function parseHtmlTable(html: string, symbol: string): any[] {
+  const contracts: any[] = [];
+  
+  // Find all table rows
+  const rowPattern = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  const rows = [...html.matchAll(rowPattern)];
+  
+  let headerFound = false;
+  let headerIndexes: Record<string, number> = {};
+  
+  for (const rowMatch of rows) {
+    const rowHtml = rowMatch[1];
+    
+    // Extract text content from cells
+    const cellPattern = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+    const cells = [...rowHtml.matchAll(cellPattern)].map(match => {
+      // Remove HTML tags and get text content
+      return match[1].replace(/<[^>]+>/g, '').trim();
+    }).filter(cell => cell.length > 0);
+    
+    if (cells.length === 0) continue;
+    
+    // Detect header row
+    if (!headerFound && cells.some(cell => {
+      const lower = cell.toLowerCase();
+      return lower.includes('contract') || lower.includes('symbol') || 
+             lower.includes('last') || lower.includes('change') ||
+             lower.includes('high') || lower.includes('low') || 
+             lower.includes('open') || lower.includes('volume');
+    })) {
+      headerFound = true;
+      cells.forEach((cell, idx) => {
+        const lower = cell.toLowerCase();
+        if (lower.includes('contract') || lower.includes('symbol')) headerIndexes.contract = idx;
+        if (lower.includes('last') || lower.includes('latest')) headerIndexes.last = idx;
+        if (lower.includes('change') && !lower.includes('%')) headerIndexes.change = idx;
+        if (lower.includes('high')) headerIndexes.high = idx;
+        if (lower.includes('low')) headerIndexes.low = idx;
+        if (lower.includes('open')) headerIndexes.open = idx;
+        if (lower.includes('volume')) headerIndexes.volume = idx;
+        if (lower.includes('change') && lower.includes('%')) headerIndexes.changePercent = idx;
+      });
+      continue;
+    }
+    
+    // Parse data rows
+    if (headerFound && cells.length >= 2) {
+      const contractCell = cells[headerIndexes.contract] || cells[0];
+      const lastCell = cells[headerIndexes.last] || cells[1];
+      
+      // Check if contract matches our symbol pattern (more flexible matching)
+      if (contractCell) {
+        // Try exact match first
+        const exactMatch = contractCell.match(new RegExp(`^${symbol}[${MONTH_CODES}]\\d{2}$`, 'i'));
+        // Also try to find contract pattern anywhere in the cell
+        const patternMatch = contractCell.match(new RegExp(`${symbol}[${MONTH_CODES}]\\d{2}`, 'i'));
+        
+        if (exactMatch || patternMatch) {
+          const contractSymbol = (exactMatch ? exactMatch[0] : patternMatch![0]).toUpperCase();
+          
+          contracts.push({
+            contract: contractSymbol,
+            last: lastCell || undefined,
+            change: cells[headerIndexes.change] || undefined,
+            high: cells[headerIndexes.high] || undefined,
+            low: cells[headerIndexes.low] || undefined,
+            open: cells[headerIndexes.open] || undefined,
+            volume: cells[headerIndexes.volume] || undefined,
+            changePercent: cells[headerIndexes.changePercent] || undefined,
+          });
+        }
+      }
+    }
+  }
+  
+  // Also try regex pattern matching in the entire HTML to catch any missed contracts
+  const contractPattern = new RegExp(`(${symbol}[${MONTH_CODES}]\\d{2})`, 'gi');
+  const allContractMatches = [...html.matchAll(contractPattern)];
+  const foundContracts = new Set<string>();
+  
+  // Add contracts found via table parsing
+  contracts.forEach(c => foundContracts.add(c.contract));
+  
+  // Look for additional contracts in the HTML that might have been missed
+  for (const match of allContractMatches) {
+    const contractSymbol = match[1].toUpperCase();
+    if (!foundContracts.has(contractSymbol)) {
+      // Try to find price near this contract symbol
+      const contractIndex = match.index || 0;
+      const context = html.substring(Math.max(0, contractIndex - 200), Math.min(html.length, contractIndex + 500));
+      
+      // Look for price patterns near the contract
+      const pricePatterns = [
+        /(\d{1,3}(?:,\d{3})*(?:\.\d+)?)/g,
+        /(\d+\.\d+)/g,
+      ];
+      
+      let price = '';
+      for (const pricePattern of pricePatterns) {
+        const priceMatches = [...context.matchAll(pricePattern)];
+        if (priceMatches.length > 0) {
+          // Take the first reasonable price after the contract
+          const afterContract = context.substring(context.indexOf(match[1]) + match[1].length);
+          const afterMatches = [...afterContract.matchAll(pricePattern)];
+          if (afterMatches.length > 0) {
+            price = afterMatches[0][1];
+            break;
+          }
+        }
+      }
+      
+      if (price || contracts.length === 0) {
+        contracts.push({
+          contract: contractSymbol,
+          last: price || undefined,
+        });
+        foundContracts.add(contractSymbol);
+      }
+    }
+  }
+  
+  return contracts;
+}
 
 // Helper function to parse markdown table
 function parseMarkdownTable(markdown: string, symbol: string): any[] {
@@ -53,7 +181,7 @@ function parseMarkdownTable(markdown: string, symbol: string): any[] {
         cells.forEach((cell, idx) => {
           const lower = cell.toLowerCase();
           if (lower.includes('contract') || lower.includes('symbol')) headerIndexes.contract = idx;
-          if (lower.includes('last')) headerIndexes.last = idx;
+          if (lower.includes('last') || lower.includes('latest')) headerIndexes.last = idx;
           if (lower.includes('change') && !lower.includes('%')) headerIndexes.change = idx;
           if (lower.includes('high')) headerIndexes.high = idx;
           if (lower.includes('low')) headerIndexes.low = idx;
@@ -74,20 +202,46 @@ function parseMarkdownTable(markdown: string, symbol: string): any[] {
         const contractCell = cells[headerIndexes.contract] || cells[0];
         const lastCell = cells[headerIndexes.last] || cells[1];
         
-        // Check if contract matches our symbol pattern
-        if (contractCell && contractCell.match(new RegExp(`^${symbol}[${MONTH_CODES}]\\d{2}$`, 'i'))) {
-          contracts.push({
-            contract: contractCell.toUpperCase(),
-            last: lastCell,
-            change: cells[headerIndexes.change] || undefined,
-            high: cells[headerIndexes.high] || undefined,
-            low: cells[headerIndexes.low] || undefined,
-            open: cells[headerIndexes.open] || undefined,
-            volume: cells[headerIndexes.volume] || undefined,
-            changePercent: cells[headerIndexes.changePercent] || undefined,
-          });
+        // More flexible contract matching
+        if (contractCell) {
+          const exactMatch = contractCell.match(new RegExp(`^${symbol}[${MONTH_CODES}]\\d{2}$`, 'i'));
+          const patternMatch = contractCell.match(new RegExp(`${symbol}[${MONTH_CODES}]\\d{2}`, 'i'));
+          
+          if (exactMatch || patternMatch) {
+            const contractSymbol = (exactMatch ? exactMatch[0] : patternMatch![0]).toUpperCase();
+            
+            contracts.push({
+              contract: contractSymbol,
+              last: lastCell,
+              change: cells[headerIndexes.change] || undefined,
+              high: cells[headerIndexes.high] || undefined,
+              low: cells[headerIndexes.low] || undefined,
+              open: cells[headerIndexes.open] || undefined,
+              volume: cells[headerIndexes.volume] || undefined,
+              changePercent: cells[headerIndexes.changePercent] || undefined,
+            });
+          }
         }
       }
+    }
+  }
+  
+  // Also use regex to find all contract patterns in markdown
+  const contractPattern = new RegExp(`\\b(${symbol}[${MONTH_CODES}]\\d{2})\\b`, 'gi');
+  const allMatches = [...markdown.matchAll(contractPattern)];
+  const foundContracts = new Set<string>();
+  
+  contracts.forEach(c => foundContracts.add(c.contract));
+  
+  // Add any contracts found via regex that weren't in the table
+  for (const match of allMatches) {
+    const contractSymbol = match[1].toUpperCase();
+    if (!foundContracts.has(contractSymbol)) {
+      contracts.push({
+        contract: contractSymbol,
+        last: undefined, // Will be filled from table if available
+      });
+      foundContracts.add(contractSymbol);
     }
   }
   
@@ -120,125 +274,192 @@ Deno.serve(async (req) => {
       );
     }
 
-    const apiKey = Deno.env.get('FIRECRAWL_API_KEY');
-    if (!apiKey) {
-      console.error('FIRECRAWL_API_KEY not configured');
-      const errorMsg = 'Firecrawl API key not configured. Please add FIRECRAWL_API_KEY as a secret in Supabase Edge Functions settings.';
-      return new Response(
-        JSON.stringify({ success: false, error: errorMsg }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-    
-    console.log('FIRECRAWL_API_KEY found, length:', apiKey.length);
-
-    // Use the futures prices page
+    // ============================================
+    // OPTIMIZED SCRAPING LOGIC WITH PLAYWRIGHT
+    // ============================================
+    // Step 1: Build the target URL for the futures prices page
     const url = `https://www.barchart.com/futures/quotes/${symbol}%2A/futures-prices`;
     console.log('Scraping prices for symbol:', symbol, 'URL:', url);
 
-    // Use extract format with a comprehensive prompt to get ALL structured data via LLM
-    const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        url,
-        formats: ['extract', 'markdown', 'html'],
-        extract: {
-          prompt: `Extract ALL futures contract data from this page. This page shows a table of futures contracts for ${symbol}.
-
-For EACH row in the futures prices table, extract ALL available data:
-- contract: The full contract symbol (e.g., DXH26, DXM26, DXU26, DXZ26, 6EH26, 6EM26, 6EU26, 6EZ26, etc.)
-- last: The last/latest price
-- change: The price change (can be positive like +0.145 or negative like -0.120)
-- high: The high price for the day (if available)
-- low: The low price for the day (if available)
-- open: The opening price (if available)
-- volume: The trading volume (if available)
-- changePercent: The percentage change (if available)
-
-IMPORTANT: Extract ALL contracts visible on the page, not just a few. Look for the complete table with all contract months and years.
-Include contracts for all expiration months (H, M, U, Z for March, June, September, December, plus others if shown).
-
-Return ALL contracts that match the pattern ${symbol}[LETTER][YEAR] (e.g., ${symbol}H26, ${symbol}M26, ${symbol}U26, ${symbol}Z26, ${symbol}H27, etc.).
-
-Format the response as a JSON object with a contracts array containing all extracted contracts.`,
-          schema: {
-            type: 'object',
-            properties: {
-              contracts: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  properties: {
-                    contract: { type: 'string', description: 'Contract symbol like DXH26, 6EH26' },
-                    last: { type: 'string', description: 'Last/latest price' },
-                    change: { type: 'string', description: 'Price change' },
-                    high: { type: 'string', description: 'High price' },
-                    low: { type: 'string', description: 'Low price' },
-                    open: { type: 'string', description: 'Opening price' },
-                    volume: { type: 'string', description: 'Trading volume' },
-                    changePercent: { type: 'string', description: 'Percentage change' }
-                  },
-                  required: ['contract', 'last']
-                }
-              }
-            },
-            required: ['contracts']
+    let contracts: any[] = [];
+    
+    // Step 2: Try Playwright first, fallback to fetch if it fails
+    try {
+      // Use optimized scraping utility with resource blocking and retry logic
+      // This handles browser reuse, concurrency limiting, and automatic retries
+      contracts = await scrapeWithPlaywright(
+      url,
+      async (page: Page, jsonResponses: Map<string, any>) => {
+        console.log('Page loaded, extracting HTML content...');
+        
+        // Try to extract data from JSON responses first (if available)
+        let contractsFromJson: any[] = [];
+        for (const [responseUrl, jsonData] of jsonResponses.entries()) {
+          console.log(`Found JSON response: ${responseUrl}`);
+          // Try to extract contracts from JSON if the structure matches
+          if (Array.isArray(jsonData)) {
+            contractsFromJson = jsonData;
+          } else if (jsonData?.data && Array.isArray(jsonData.data)) {
+            contractsFromJson = jsonData.data;
+          } else if (jsonData?.contracts && Array.isArray(jsonData.contracts)) {
+            contractsFromJson = jsonData.contracts;
           }
-        },
-        waitFor: 12000, // Increased wait time for page to fully load
-        timeout: 60000, // 60 second timeout
-      }),
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      console.error('Firecrawl API error:', data);
-      return new Response(
-        JSON.stringify({ success: false, error: data.error || `Request failed with status ${response.status}` }),
-        { status: response.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        }
+        
+        // Step 3: Extract HTML content from the fully loaded page
+        const html = await page.content();
+        
+        // Step 4: Parse HTML table to extract contract data
+        // This uses the existing parseHtmlTable function to extract structured data
+        let contracts = parseHtmlTable(html, symbol);
+        console.log(`Found ${contracts.length} contracts in HTML`);
+        
+        // Step 5: Also try markdown parsing as a fallback method
+        const markdownContracts = parseMarkdownTable(html, symbol);
+        console.log(`Found ${markdownContracts.length} contracts via markdown parsing`);
+        
+        // Step 6: Merge contracts from all sources (JSON, HTML, markdown)
+        const allContractsMap = new Map<string, any>();
+        
+        // Add contracts from JSON if available
+        contractsFromJson.forEach((c: any) => {
+          if (c.contract) {
+            allContractsMap.set(c.contract.toUpperCase(), c);
+          }
+        });
+        
+        // Add contracts from HTML parsing
+        contracts.forEach(c => {
+          if (c.contract) {
+            const contractKey = c.contract.toUpperCase();
+            if (allContractsMap.has(contractKey)) {
+              const existing = allContractsMap.get(contractKey)!;
+              allContractsMap.set(contractKey, {
+                ...existing,
+                ...c,
+                // Prefer non-empty values
+                last: c.last || existing.last,
+                change: c.change || existing.change,
+                high: c.high || existing.high,
+                low: c.low || existing.low,
+                open: c.open || existing.open,
+                volume: c.volume || existing.volume,
+                changePercent: c.changePercent || existing.changePercent,
+              });
+            } else {
+              allContractsMap.set(contractKey, c);
+            }
+          }
+        });
+        
+        // Add contracts from markdown parsing
+        markdownContracts.forEach(c => {
+          if (c.contract) {
+            const contractKey = c.contract.toUpperCase();
+            if (allContractsMap.has(contractKey)) {
+              const existing = allContractsMap.get(contractKey)!;
+              allContractsMap.set(contractKey, {
+                ...existing,
+                ...c,
+                // Prefer non-empty values
+                last: c.last || existing.last,
+                change: c.change || existing.change,
+                high: c.high || existing.high,
+                low: c.low || existing.low,
+                open: c.open || existing.open,
+                volume: c.volume || existing.volume,
+                changePercent: c.changePercent || existing.changePercent,
+              });
+            } else {
+              allContractsMap.set(contractKey, c);
+            }
+          }
+        });
+        
+        // Convert map to array
+        const allContracts = Array.from(allContractsMap.values());
+        console.log(`Total unique contracts found: ${allContracts.length}`);
+        
+        return allContracts;
+      },
+      {
+        // Wait for table selector to appear (more reliable than fixed timeout)
+        waitForSelector: 'table, [class*="table"], [class*="data-table"]',
+        // Intercept JSON API responses that might contain contract data
+        interceptJsonUrls: ['api', 'data', 'quotes', 'futures'],
+        maxRetries: 3,
+      }
       );
-    }
-
-    console.log('Firecrawl response received');
-    
-    // Extract the data from LLM extraction
-    const extractedData = data.data?.extract || data.extract || {};
-    let contracts = extractedData.contracts || [];
-    
-    console.log(`Extracted ${contracts.length} contracts via LLM extraction`);
-
-    // Also try to extract from markdown/HTML as fallback
-    const markdown = data.data?.markdown || data.markdown || '';
-    const html = data.data?.html || data.html || '';
-    
-    // If LLM extraction returned few contracts, try parsing markdown/HTML
-    if (contracts.length < 5 && (markdown.length > 0 || html.length > 0)) {
-      console.log('LLM extraction returned few contracts, trying markdown/HTML parsing...');
+    } catch (playwrightError) {
+      // Fallback to fetch if Playwright fails (e.g., browser binaries not available)
+      const errorMsg = playwrightError instanceof Error ? playwrightError.message : String(playwrightError);
+      console.log('Playwright failed, falling back to fetch:', errorMsg);
       
-      // Parse markdown table
-      const markdownContracts = parseMarkdownTable(markdown, symbol);
-      if (markdownContracts.length > contracts.length) {
-        console.log(`Found ${markdownContracts.length} contracts in markdown`);
-        contracts = markdownContracts;
+      // Check if it's a browser launch error - in that case, skip Playwright entirely next time
+      if (errorMsg.includes('browser launch') || errorMsg.includes('Executable doesn\'t exist') || errorMsg.includes('Browser closed')) {
+        console.log('Browser binaries not available, using fetch directly');
+      }
+      
+      try {
+        const html = await scrapeWithFetch(url, { timeout: 30000 });
+        console.log('Fetch successful, parsing HTML...');
+        
+        // Parse HTML using existing functions
+        contracts = parseHtmlTable(html, symbol);
+        console.log(`Found ${contracts.length} contracts via fetch fallback`);
+        
+        const markdownContracts = parseMarkdownTable(html, symbol);
+        console.log(`Found ${markdownContracts.length} contracts via markdown parsing`);
+        
+        // Merge contracts
+        const allContractsMap = new Map<string, any>();
+        contracts.forEach(c => {
+          if (c.contract) {
+            allContractsMap.set(c.contract.toUpperCase(), c);
+          }
+        });
+        markdownContracts.forEach(c => {
+          if (c.contract) {
+            const contractKey = c.contract.toUpperCase();
+            if (allContractsMap.has(contractKey)) {
+              const existing = allContractsMap.get(contractKey)!;
+              allContractsMap.set(contractKey, {
+                ...existing,
+                ...c,
+                last: c.last || existing.last,
+                change: c.change || existing.change,
+                high: c.high || existing.high,
+                low: c.low || existing.low,
+                open: c.open || existing.open,
+                volume: c.volume || existing.volume,
+                changePercent: c.changePercent || existing.changePercent,
+              });
+            } else {
+              allContractsMap.set(contractKey, c);
+            }
+          }
+        });
+        contracts = Array.from(allContractsMap.values());
+        console.log(`Total contracts after merge: ${contracts.length}`);
+      } catch (fetchError) {
+        console.error('Fetch fallback also failed:', fetchError);
+        // Instead of throwing, return empty contracts array so the function can still return a valid response
+        console.log('Both Playwright and fetch failed, returning empty contracts array');
+        contracts = [];
       }
     }
 
     // Map to our format and filter valid contracts
     const futuresData: FuturesData[] = contracts
       .filter((c: { contract?: string; last?: string }) => {
-        if (!c.contract || !c.last) return false;
+        if (!c.contract) return false;
         // Validate contract format - allow any month code and year
         const contractRegex = new RegExp(`^${symbol}[${MONTH_CODES}]\\d{2}$`, 'i');
         return contractRegex.test(c.contract);
       })
       .map((c: any) => ({
         contract: c.contract.toUpperCase(),
-        latest: c.last || c.latest,
+        latest: c.last || c.latest || 'N/A', // Include contracts even without price
         change: c.change || undefined,
         high: c.high || undefined,
         low: c.low || undefined,
@@ -246,6 +467,21 @@ Format the response as a JSON object with a contracts array containing all extra
         volume: c.volume || undefined,
         changePercent: c.changePercent || undefined,
       }));
+
+    // If no contracts found, return empty array with success=true instead of error
+    if (futuresData.length === 0) {
+      console.log(`No contracts found for ${symbol}, returning empty array`);
+      return new Response(
+        JSON.stringify({ 
+          success: true, 
+          symbol,
+          data: [],
+          count: 0,
+          message: 'No contracts found. The page structure may have changed or the symbol may not be available.'
+        }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
 
     // Deduplicate
     const seen = new Set<string>();
@@ -282,7 +518,6 @@ Format the response as a JSON object with a contracts array containing all extra
 
     if (debug) {
       responsePayload.debug = {
-        extractedData,
         rawContracts: contracts,
       };
     }

@@ -66,10 +66,10 @@ const Index = () => {
               </TabsList>
               
               <TabsContent value="futures" className="mt-0">
-                <FuturesContractsTable
-                  currencyId={selectedCurrency}
-                  contracts={contracts || []}
-                  isLoading={isLoading}
+            <FuturesContractsTable
+              currencyId={selectedCurrency}
+              contracts={contracts || []}
+              isLoading={isLoading}
                   isError={isError}
                   error={error}
                   onBack={handleBack}
@@ -79,8 +79,8 @@ const Index = () => {
               <TabsContent value="options" className="mt-0">
                 <OptionsTable
                   currencyId={selectedCurrency}
-                  onBack={handleBack}
-                />
+              onBack={handleBack}
+            />
               </TabsContent>
             </Tabs>
           )}

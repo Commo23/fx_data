@@ -1,0 +1,658 @@
+import { Request, Response } from 'express';
+import { scrapeWithPlaywright, type Page } from '../playwright-utils';
+
+const MONTH_CODES = 'FGHJKMNQUVXZ';
+
+function parseHtmlTable(html: string, symbol: string): any[] {
+  const contracts: any[] = [];
+  
+  // Try multiple parsing strategies
+  
+  // Strategy 1: Parse table rows
+  const rowPattern = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  const rows = [...html.matchAll(rowPattern)];
+  
+  let headerFound = false;
+  let headerIndexes: Record<string, number> = {};
+  
+  for (const rowMatch of rows) {
+    const rowHtml = rowMatch[1];
+    const cellPattern = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+    const cells = [...rowHtml.matchAll(cellPattern)].map(match => {
+      return match[1].replace(/<[^>]+>/g, '').trim();
+    }).filter(cell => cell.length > 0);
+    
+    if (cells.length === 0) continue;
+    
+    if (!headerFound && cells.some(cell => {
+      const lower = cell.toLowerCase();
+      return lower.includes('contract') || lower.includes('symbol') || 
+             lower.includes('last') || lower.includes('change') ||
+             lower.includes('quote');
+    })) {
+      headerFound = true;
+      cells.forEach((cell, idx) => {
+        const lower = cell.toLowerCase();
+        if (lower.includes('contract') || lower.includes('symbol') || lower.includes('quote')) headerIndexes.contract = idx;
+        if (lower.includes('last') || lower.includes('latest') || lower.includes('price')) headerIndexes.last = idx;
+        if (lower.includes('change') && !lower.includes('%')) headerIndexes.change = idx;
+        if (lower.includes('high')) headerIndexes.high = idx;
+        if (lower.includes('low')) headerIndexes.low = idx;
+        if (lower.includes('open')) headerIndexes.open = idx;
+        if (lower.includes('volume')) headerIndexes.volume = idx;
+        if (lower.includes('change') && lower.includes('%')) headerIndexes.changePercent = idx;
+      });
+      continue;
+    }
+    
+    if (headerFound && cells.length >= 2) {
+      const contractCell = cells[headerIndexes.contract] || cells[0];
+      const lastCell = cells[headerIndexes.last] || cells[1];
+      
+      if (contractCell) {
+        const exactMatch = contractCell.match(new RegExp(`^${symbol}[${MONTH_CODES}]\\d{2}$`, 'i'));
+        const patternMatch = contractCell.match(new RegExp(`${symbol}[${MONTH_CODES}]\\d{2}`, 'i'));
+        
+        if (exactMatch || patternMatch) {
+          const contractSymbol = (exactMatch ? exactMatch[0] : patternMatch![0]).toUpperCase();
+          
+          contracts.push({
+            contract: contractSymbol,
+            latest: lastCell || undefined,
+            change: cells[headerIndexes.change] || undefined,
+            high: cells[headerIndexes.high] || undefined,
+            low: cells[headerIndexes.low] || undefined,
+            open: cells[headerIndexes.open] || undefined,
+            volume: cells[headerIndexes.volume] || undefined,
+            changePercent: cells[headerIndexes.changePercent] || undefined,
+          });
+        }
+      }
+    }
+  }
+  
+  // Strategy 2: Look for contract patterns in divs/spans (for React-rendered content)
+  if (contracts.length === 0) {
+    const contractPattern = new RegExp(`(${symbol}[${MONTH_CODES}]\\d{2})`, 'gi');
+    const contractMatches = [...html.matchAll(contractPattern)];
+    const foundContracts = new Set<string>();
+    
+    for (const match of contractMatches) {
+      const contractSymbol = match[1].toUpperCase();
+      if (!foundContracts.has(contractSymbol)) {
+        // Try to find price data near the contract
+        const contractIndex = match.index || 0;
+        const context = html.substring(
+          Math.max(0, contractIndex - 300),
+          Math.min(html.length, contractIndex + 800)
+        );
+        
+        // Look for price patterns (numbers with decimals)
+        const pricePattern = /(\d{1,3}(?:,\d{3})*(?:\.\d+)?)/g;
+        const priceMatches = [...context.matchAll(pricePattern)];
+        
+        // Find the first reasonable price after the contract
+        const afterContract = context.substring(context.indexOf(match[1]) + match[1].length);
+        const afterMatches = [...afterContract.matchAll(pricePattern)];
+        
+        if (afterMatches.length > 0) {
+          // Take the first few prices as potential latest, change, etc.
+          contracts.push({
+            contract: contractSymbol,
+            latest: afterMatches[0][1] || undefined,
+            change: afterMatches[1]?.[1] || undefined,
+            high: afterMatches[2]?.[1] || undefined,
+            low: afterMatches[3]?.[1] || undefined,
+          });
+          foundContracts.add(contractSymbol);
+        }
+      }
+    }
+  }
+  
+  return contracts;
+}
+
+export async function scrapeForexPrices(req: Request, res: Response) {
+  try {
+    const { symbol } = req.body;
+
+    if (!symbol) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Symbol is required' 
+      });
+    }
+
+    // Build URL for futures prices page
+    // Format: https://www.barchart.com/futures/quotes/{SYMBOL}*/futures-prices
+    // Example: https://www.barchart.com/futures/quotes/DX*/futures-prices (all DX contracts)
+    // Example: https://www.barchart.com/futures/quotes/DXH26/futures-prices (specific contract)
+    // We use %2A (*) to get all contracts for the symbol
+    const url = `https://www.barchart.com/futures/quotes/${symbol}%2A/futures-prices`;
+    console.log('Scraping prices for symbol:', symbol, 'URL:', url);
+
+    let contracts: any[] = [];
+    
+    try {
+      contracts = await scrapeWithPlaywright(
+        url,
+        async (page: Page, jsonResponses: Map<string, any>) => {
+          console.log('Page loaded, waiting for futures table...');
+          
+          // Wait for the futures table to load - try multiple strategies
+          console.log('Waiting for futures table to load...');
+          
+          // Strategy 1: Wait for any table element to appear
+          let tableElement = null;
+          const tableSelectors = [
+            'table',
+            '[class*="table"]',
+            '[class*="bc-table"]',
+            '[class*="futures"]',
+            '[id*="table"]',
+            '[data-ng-if*="table"]',
+          ];
+          
+          for (const selector of tableSelectors) {
+            try {
+              await page.waitForSelector(selector, { timeout: 5000 });
+              tableElement = await page.$(selector);
+              if (tableElement) {
+                console.log(`Found table element with selector: ${selector}`);
+                break;
+              }
+            } catch (e) {
+              // Continue to next selector
+            }
+          }
+          
+          // Strategy 2: Wait for table rows with contract symbols (more aggressive)
+          let tableLoaded = false;
+          for (let attempt = 0; attempt < 30; attempt++) {
+            const result = await page.evaluate((sym) => {
+              // Look for any text containing contract patterns
+              const bodyText = document.body.innerText || '';
+              const contractPattern = new RegExp(`${sym}[FGHJKMNQUVXZ]\\d{2}`, 'i');
+              if (contractPattern.test(bodyText)) {
+                // Also check for table rows
+                const rows = Array.from(document.querySelectorAll('table tbody tr, table tr, [class*="table"] tr, [class*="row"]'));
+                for (const row of rows) {
+                  const text = row.textContent || '';
+                  if (contractPattern.test(text)) {
+                    return { found: true, rowCount: rows.length, sampleText: text.substring(0, 200) };
+                  }
+                }
+                return { found: true, rowCount: 0, sampleText: bodyText.substring(0, 500) };
+              }
+              return { found: false, rowCount: 0, sampleText: '' };
+            }, symbol);
+            
+            if (result.found) {
+              console.log(`Table data found after ${attempt + 1} attempts (rows: ${result.rowCount})`);
+              if (result.sampleText) {
+                console.log('Sample text:', result.sampleText);
+              }
+              tableLoaded = true;
+              break;
+            }
+            
+            if (attempt % 5 === 0) {
+              console.log(`Still waiting... attempt ${attempt + 1}/30`);
+            }
+            
+            await page.waitForTimeout(1000);
+          }
+          
+          if (!tableLoaded) {
+            console.log('Table not found, trying to scroll and wait...');
+            // Scroll multiple times to trigger lazy loading
+            for (let i = 0; i < 5; i++) {
+              await page.evaluate(() => {
+                window.scrollTo(0, (i + 1) * (document.body.scrollHeight / 6));
+              });
+              await page.waitForTimeout(1500);
+            }
+            
+            // Wait a bit more after scrolling
+            await page.waitForTimeout(3000);
+          }
+          
+          // Wait for XHR responses from Barchart API (longer timeout)
+          try {
+            console.log('Waiting for Barchart API response...');
+            await page.waitForResponse(
+              (response) => {
+                const url = response.url();
+                const contentType = response.headers()['content-type'] || '';
+                return (url.includes('proxies/core-api') || 
+                       url.includes('quotes/get') || 
+                       url.includes('quotes') ||
+                       (url.includes('barchart.com') && url.includes('api'))) &&
+                       (contentType.includes('json') || contentType.includes('text'));
+              },
+              { timeout: 20000 }
+            );
+            console.log('Barchart API response received');
+            await page.waitForTimeout(3000); // Give time for DOM to update
+          } catch (e) {
+            console.log('No Barchart API response detected, continuing...');
+          }
+          
+          // Final wait for networkidle
+          try {
+            await page.waitForLoadState('networkidle', { timeout: 15000 });
+          } catch (e) {
+            console.log('Networkidle timeout, continuing...');
+          }
+          
+          // Additional wait to ensure table is rendered
+          await page.waitForTimeout(3000);
+          
+          // Extract contracts directly from DOM table
+          console.log('Extracting contracts directly from DOM...');
+          const domContracts = await page.evaluate((sym) => {
+            const contracts: any[] = [];
+            const monthCodes = 'FGHJKMNQUVXZ';
+            const contractPattern = new RegExp(`(${sym}[${monthCodes}]\\d{2}|[A-Z0-9]+[${monthCodes}]\\d{2})`, 'i');
+            
+            // Strategy 1: Find all table rows
+            const allRows = Array.from(document.querySelectorAll('table tbody tr, table tr, [class*="table"] tr, [class*="row"]'));
+            console.log(`Found ${allRows.length} table rows`);
+            
+            for (const row of allRows) {
+              const cells = Array.from(row.querySelectorAll('td, th'));
+              if (cells.length < 2) continue;
+              
+              const rowText = row.textContent || '';
+              
+              // Look for contract symbol in the row
+              const contractMatch = rowText.match(contractPattern);
+              if (!contractMatch) continue;
+              
+              const contractSymbol = contractMatch[1].toUpperCase();
+              
+              // Extract data from cells
+              const cellTexts = cells.map(cell => (cell.textContent || '').trim().replace(/\s+/g, ' '));
+              
+              // Find Latest, Change, High, Low, Open, Volume, etc.
+              let latest = '';
+              let change = '';
+              let high = '';
+              let low = '';
+              let open = '';
+              let volume = '';
+              
+              // Try to find prices in the row
+              for (let i = 0; i < cellTexts.length; i++) {
+                const text = cellTexts[i];
+                
+                // Latest price (usually first number after contract, may have 's' suffix)
+                if (!latest && /^\d+\.\d+/.test(text)) {
+                  latest = text.replace(/[sS]$/, '').trim();
+                }
+                
+                // Change (usually has + or -)
+                if (!change && /^[+-]\d+\.\d+/.test(text)) {
+                  change = text.trim();
+                }
+                
+                // High, Low, Open (numbers with decimals)
+                if (/^\d+\.\d+$/.test(text)) {
+                  if (!high) high = text;
+                  else if (!low) low = text;
+                  else if (!open) open = text;
+                }
+                
+                // Volume (numbers with commas)
+                if (/^\d{1,3}(?:,\d{3})+$/.test(text)) {
+                  volume = text;
+                }
+              }
+              
+              if (contractSymbol && latest) {
+                contracts.push({
+                  contract: contractSymbol,
+                  latest: latest,
+                  change: change || undefined,
+                  high: high || undefined,
+                  low: low || undefined,
+                  open: open || undefined,
+                  volume: volume || undefined,
+                });
+              }
+            }
+            
+            // Strategy 2: If no contracts found in tables, try to extract from body text
+            if (contracts.length === 0) {
+              const bodyText = document.body.innerText || '';
+              const matches = [...bodyText.matchAll(contractPattern)];
+              
+              for (const match of matches) {
+                const contractSymbol = match[1].toUpperCase();
+                const matchIndex = match.index || 0;
+                
+                // Extract context around the contract
+                const context = bodyText.substring(
+                  Math.max(0, matchIndex - 100),
+                  Math.min(bodyText.length, matchIndex + 500)
+                );
+                
+                // Look for prices near the contract
+                const pricePattern = /([+-]?\d+\.\d+)/g;
+                const prices = [...context.matchAll(pricePattern)];
+                
+                if (prices.length > 0) {
+                  const afterContract = context.substring(context.indexOf(match[1]) + match[1].length);
+                  const afterPrices = [...afterContract.matchAll(pricePattern)];
+                  
+                  if (afterPrices.length > 0) {
+                    contracts.push({
+                      contract: contractSymbol,
+                      latest: afterPrices[0][1],
+                      change: afterPrices[1]?.[1] || undefined,
+                      high: afterPrices[2]?.[1] || undefined,
+                      low: afterPrices[3]?.[1] || undefined,
+                    });
+                  }
+                }
+              }
+            }
+            
+            return contracts;
+          }, symbol);
+          
+          console.log(`Extracted ${domContracts.length} contracts directly from DOM`);
+          if (domContracts.length > 0) {
+            console.log('Sample contracts:', domContracts.slice(0, 3).map(c => c.contract));
+          }
+          
+          // Final HTML fetch
+          let html = await page.content();
+          console.log(`Final HTML content length: ${html.length} characters`);
+          
+          // Try to extract data from JSON responses first
+          let contractsFromJson: any[] = [];
+          for (const [responseUrl, jsonData] of jsonResponses.entries()) {
+            console.log(`Checking JSON response: ${responseUrl}`);
+            
+            // Check if this is a Barchart API response
+            if (responseUrl.includes('barchart.com') && (responseUrl.includes('quotes/get') || responseUrl.includes('quotes') || responseUrl.includes('proxies/core-api'))) {
+              console.log('Found Barchart API response, extracting contracts...');
+              console.log('JSON structure preview:', JSON.stringify(jsonData).substring(0, 1000));
+              
+              // Barchart API structure: { data: { [symbol]: { list: { [listName]: [...] } } } }
+              if (jsonData?.data) {
+                for (const symbolKey of Object.keys(jsonData.data)) {
+                  const symbolData = jsonData.data[symbolKey];
+                  if (symbolData && typeof symbolData === 'object') {
+                    // Check if symbolKey matches our pattern
+                    const contractMatch = symbolKey.match(new RegExp(`${symbol}[${MONTH_CODES}]\\d{2}`, 'i'));
+                    if (contractMatch) {
+                      contractsFromJson.push({
+                        contract: symbolKey.toUpperCase(),
+                        latest: symbolData.lastPrice || symbolData.last || symbolData.price || '',
+                        change: symbolData.change || symbolData.netChange || '',
+                        high: symbolData.high || '',
+                        low: symbolData.low || '',
+                        open: symbolData.open || symbolData.openPrice || '',
+                        volume: symbolData.volume || '',
+                        changePercent: symbolData.percentChange || symbolData.changePercent || '',
+                      });
+                    }
+                    // Check if it's a contract object with symbol property
+                    if (symbolData.symbol || symbolData.contract) {
+                      const contractSymbol = (symbolData.symbol || symbolData.contract).toUpperCase();
+                      if (contractSymbol.match(new RegExp(`${symbol}[${MONTH_CODES}]\\d{2}`, 'i'))) {
+                        contractsFromJson.push({
+                          contract: contractSymbol,
+                          latest: symbolData.lastPrice || symbolData.last || symbolData.price || '',
+                          change: symbolData.change || symbolData.netChange || '',
+                          high: symbolData.high || '',
+                          low: symbolData.low || '',
+                          open: symbolData.open || symbolData.openPrice || '',
+                          volume: symbolData.volume || '',
+                          changePercent: symbolData.percentChange || symbolData.changePercent || '',
+                        });
+                      }
+                    }
+                    // Also check for lists/arrays (futures.list.futures.prices)
+                    if (symbolData.list) {
+                      for (const listKey of Object.keys(symbolData.list)) {
+                        const listData = symbolData.list[listKey];
+                        if (Array.isArray(listData)) {
+                          console.log(`Found ${listData.length} items in list: ${listKey}`);
+                          // Add all items that match our symbol pattern
+                          for (const item of listData) {
+                            if (item && typeof item === 'object') {
+                              const itemSymbol = (item.symbol || item.contract || item.longSymbol || '').toUpperCase();
+                              if (itemSymbol.match(new RegExp(`${symbol}[${MONTH_CODES}]\\d{2}`, 'i'))) {
+                                contractsFromJson.push({
+                                  contract: itemSymbol,
+                                  latest: item.lastPrice || item.last || item.price || '',
+                                  change: item.change || item.netChange || '',
+                                  high: item.high || '',
+                                  low: item.low || '',
+                                  open: item.open || item.openPrice || '',
+                                  volume: item.volume || '',
+                                  changePercent: item.percentChange || item.changePercent || '',
+                                });
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              
+              console.log(`Extracted ${contractsFromJson.length} contracts from Barchart API`);
+            }
+            
+            // Generic JSON parsing
+            if (Array.isArray(jsonData)) {
+              contractsFromJson = jsonData;
+            } else if (jsonData?.data && Array.isArray(jsonData.data)) {
+              contractsFromJson = jsonData.data;
+            } else if (jsonData?.contracts && Array.isArray(jsonData.contracts)) {
+              contractsFromJson = jsonData.contracts;
+            } else if (jsonData?.results && Array.isArray(jsonData.results)) {
+              contractsFromJson = jsonData.results;
+            }
+          }
+          console.log(`Found ${contractsFromJson.length} contracts from JSON responses`);
+          
+          // Try parsing HTML table
+          const htmlContracts = parseHtmlTable(html, symbol);
+          console.log(`Found ${htmlContracts.length} contracts in HTML table`);
+          
+          // Also try to find contracts using regex in the entire HTML
+          const contractPattern = new RegExp(`(${symbol}[${MONTH_CODES}]\\d{2})`, 'gi');
+          const allContractMatches = [...html.matchAll(contractPattern)];
+          const foundContracts = new Set<string>();
+          
+          console.log(`Found ${allContractMatches.length} contract pattern matches in HTML`);
+          
+          // Add contracts from table parsing
+          htmlContracts.forEach(c => {
+            if (c.contract) {
+              foundContracts.add(c.contract.toUpperCase());
+            }
+          });
+          
+          // Always try to extract from text content as well
+          console.log('Extracting contracts from body text...');
+          const bodyText = await page.evaluate(() => document.body.innerText);
+          console.log(`Body text length: ${bodyText.length} characters`);
+          
+          // Show a sample of the text to debug
+          const textSample = bodyText.substring(0, 2000);
+          console.log('Text sample (first 2000 chars):', textSample);
+          
+          // Look for contracts in text - try multiple patterns
+          const patterns = [
+            new RegExp(`\\b(${symbol}[${MONTH_CODES}]\\d{2})\\b`, 'gi'), // Standard pattern
+            new RegExp(`(${symbol}[${MONTH_CODES}]\\d{2})`, 'gi'), // Without word boundary
+            new RegExp(`([A-Z0-9]+[${MONTH_CODES}]\\d{2})`, 'gi'), // More flexible
+          ];
+          
+          let textContractMatches: RegExpMatchArray[] = [];
+          for (const pattern of patterns) {
+            const matches = [...bodyText.matchAll(pattern)];
+            if (matches.length > 0) {
+              console.log(`Pattern ${pattern} found ${matches.length} matches`);
+              textContractMatches = matches;
+              // Show first few matches
+              console.log('First matches:', matches.slice(0, 5).map(m => m[1]));
+              break;
+            }
+          }
+          
+          console.log(`Found ${textContractMatches.length} contract matches in text`);
+          
+          // Extract contracts from text with prices
+          for (const match of textContractMatches) {
+            const contractSymbol = match[1].toUpperCase();
+            // Verify it matches our symbol pattern
+            if (!contractSymbol.match(new RegExp(`${symbol}[${MONTH_CODES}]\\d{2}`, 'i'))) {
+              continue;
+            }
+            
+            if (!foundContracts.has(contractSymbol)) {
+              // Try to find price near this contract in text
+              const contractIndex = match.index || 0;
+              const context = bodyText.substring(
+                Math.max(0, contractIndex - 150),
+                Math.min(bodyText.length, contractIndex + 400)
+              );
+              
+              // Look for price patterns (numbers with decimals, can be negative)
+              const pricePattern = /([+-]?\d{1,3}(?:,\d{3})*(?:\.\d+)?)/g;
+              const priceMatches = [...context.matchAll(pricePattern)];
+              
+              if (priceMatches.length > 0) {
+                // Find prices after the contract symbol
+                const afterContract = context.substring(context.indexOf(match[1]) + match[1].length);
+                const afterMatches = [...afterContract.matchAll(pricePattern)];
+                
+                if (afterMatches.length > 0) {
+                  // Take first few prices as latest, change, etc.
+                  const prices = afterMatches.slice(0, 5).map(m => m[1]);
+                  htmlContracts.push({
+                    contract: contractSymbol,
+                    latest: prices[0] || undefined,
+                    change: prices[1] || undefined,
+                    high: prices[2] || undefined,
+                    low: prices[3] || undefined,
+                    open: prices[4] || undefined,
+                  });
+                  foundContracts.add(contractSymbol);
+                  console.log(`Extracted contract ${contractSymbol} with price ${prices[0]}`);
+                }
+              }
+            }
+          }
+          
+          // Look for additional contracts in the HTML
+          for (const match of allContractMatches) {
+            const contractSymbol = match[1].toUpperCase();
+            if (!foundContracts.has(contractSymbol)) {
+              // Try to find price near this contract
+              const contractIndex = match.index || 0;
+              const context = html.substring(
+                Math.max(0, contractIndex - 200),
+                Math.min(html.length, contractIndex + 500)
+              );
+              
+              // Look for price patterns
+              const pricePattern = /(\d{1,3}(?:,\d{3})*(?:\.\d+)?)/g;
+              const priceMatches = [...context.matchAll(pricePattern)];
+              
+              if (priceMatches.length > 0) {
+                htmlContracts.push({
+                  contract: contractSymbol,
+                  latest: priceMatches[0][1],
+                });
+                foundContracts.add(contractSymbol);
+              }
+            }
+          }
+          
+          console.log(`Total contracts found: ${htmlContracts.length}`);
+          
+          // Merge all sources (prioritize DOM, then JSON, then HTML)
+          const allContractsMap = new Map<string, any>();
+          
+          // Add contracts from DOM extraction (highest priority - most accurate)
+          domContracts.forEach(c => {
+            if (c.contract) {
+              const contractKey = c.contract.toUpperCase();
+              allContractsMap.set(contractKey, c);
+            }
+          });
+          
+          // Add contracts from JSON (second priority)
+          contractsFromJson.forEach((c: any) => {
+            if (c.contract || c.symbol) {
+              const contractKey = (c.contract || c.symbol).toUpperCase();
+              if (!allContractsMap.has(contractKey)) {
+                allContractsMap.set(contractKey, {
+                  contract: contractKey,
+                  latest: c.latest || c.last || c.price || '',
+                  change: c.change || '',
+                  high: c.high || '',
+                  low: c.low || '',
+                  open: c.open || '',
+                  volume: c.volume || '',
+                  changePercent: c.changePercent || c.changePercent || '',
+                });
+              } else {
+                // Merge with existing DOM data
+                const existing = allContractsMap.get(contractKey)!;
+                allContractsMap.set(contractKey, { ...existing, ...c });
+              }
+            }
+          });
+          
+          // Add contracts from HTML parsing (lowest priority - fallback)
+          htmlContracts.forEach(c => {
+            if (c.contract) {
+              const contractKey = c.contract.toUpperCase();
+              if (!allContractsMap.has(contractKey)) {
+                allContractsMap.set(contractKey, c);
+              } else {
+                // Merge with existing, but keep DOM/JSON data
+                const existing = allContractsMap.get(contractKey)!;
+                allContractsMap.set(contractKey, { ...existing, ...c });
+              }
+            }
+          });
+          
+          return Array.from(allContractsMap.values());
+        },
+        {
+          waitForSelector: 'body',
+          interceptJsonUrls: ['api', 'data', 'contracts', 'futures', 'quotes', 'barchart', 'proxies', 'core-api'],
+          maxRetries: 3,
+        }
+      );
+    } catch (playwrightError) {
+      console.error('Playwright scraping failed:', playwrightError);
+      contracts = [];
+    }
+
+    console.log(`Final extracted ${contracts.length} contracts for ${symbol}`);
+
+    res.json({
+      success: true,
+      symbol,
+      data: contracts,
+      count: contracts.length,
+    });
+  } catch (error) {
+    console.error('Error scraping prices:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Failed to scrape prices';
+    res.status(500).json({ success: false, error: errorMessage });
+  }
+}

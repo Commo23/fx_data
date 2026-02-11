@@ -60,9 +60,29 @@ This project is built with:
 - shadcn-ui
 - Tailwind CSS
 
+## Environment Variables
+
+This project requires the following environment variables:
+
+- `VITE_SUPABASE_URL` - Your Supabase project URL
+- `VITE_SUPABASE_PUBLISHABLE_KEY` - Your Supabase publishable key
+
+Copy `.env.example` to `.env` and fill in your values.
+
+For Vercel deployment, add these variables in:
+**Settings → Environment Variables**
+
 ## How can I deploy this project?
 
 Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
+
+### Deploying to Vercel
+
+1. Connect your GitHub repository to Vercel
+2. Add environment variables in Vercel project settings:
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_PUBLISHABLE_KEY`
+3. Deploy
 
 ## Can I connect a custom domain to my Lovable project?
 

@@ -6,6 +6,9 @@ declare const Deno: {
   };
 };
 
+// Import optimized Playwright utilities
+import { scrapeWithPlaywright, scrapeWithFetch, type Page } from '../_shared/playwright-utils.ts';
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -17,47 +20,64 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const apiKey = Deno.env.get('FIRECRAWL_API_KEY');
-    if (!apiKey) {
-      console.error('FIRECRAWL_API_KEY not configured');
-      return new Response(
-        JSON.stringify({ success: false, error: 'Firecrawl connector not configured' }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
+    // ============================================
+    // OPTIMIZED SCRAPING LOGIC WITH PLAYWRIGHT
+    // ============================================
     console.log('Scraping forex symbols from Barchart...');
 
-    // Scrape the currencies futures page
-    const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        url: 'https://www.barchart.com/futures/currencies',
-        formats: ['markdown', 'html'],
-        onlyMainContent: true,
-        waitFor: 3000,
-      }),
-    });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      console.error('Firecrawl API error:', data);
-      return new Response(
-        JSON.stringify({ success: false, error: data.error || `Request failed with status ${response.status}` }),
-        { status: response.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // Extract symbols from the scraped content
-    const markdown = data.data?.markdown || data.markdown || '';
-    const html = data.data?.html || data.html || '';
+    // Step 1: Define the target URL for the currencies page
+    const url = 'https://www.barchart.com/futures/currencies';
     
-    console.log('Scraped content length:', markdown.length);
+    // Step 2: Try Playwright first, fallback to fetch if it fails
+    let markdown = '';
+    let html = '';
+    
+    try {
+      // Use optimized scraping utility with resource blocking and retry logic
+      // This handles browser reuse, concurrency limiting, and automatic retries
+      const result = await scrapeWithPlaywright(
+      url,
+      async (page: Page, jsonResponses: Map<string, any>) => {
+        console.log('Page loaded, extracting content...');
+        
+        // Step 3: Extract HTML content from the fully loaded page
+        const pageHtml = await page.content();
+        
+        // Step 4: Extract text content as markdown-like format
+        // This provides a text representation for regex pattern matching
+        const bodyText = await page.evaluate(() => document.body.innerText);
+        const pageMarkdown = bodyText;
+        
+        console.log('Scraped content length:', pageMarkdown.length);
+        
+        return { markdown: pageMarkdown, html: pageHtml };
+      },
+      {
+        // Wait for table or currency list to appear
+        waitForSelector: 'table, [class*="table"], [class*="currency"], [class*="symbol"]',
+        // Intercept JSON API responses that might contain symbol data
+        interceptJsonUrls: ['api', 'data', 'symbols', 'currencies'],
+        maxRetries: 3,
+      }
+      );
+      markdown = result.markdown;
+      html = result.html;
+    } catch (playwrightError) {
+      // Fallback to fetch if Playwright fails (e.g., browser binaries not available)
+      console.log('Playwright failed, falling back to fetch:', playwrightError instanceof Error ? playwrightError.message : String(playwrightError));
+      
+      try {
+        html = await scrapeWithFetch(url, { timeout: 30000 });
+        console.log('Fetch successful, extracting text...');
+        
+        // Extract text content (simple approach - just get the HTML)
+        // In a real scenario, you might want to use a simple HTML parser
+        markdown = html; // Use HTML as markdown for pattern matching
+      } catch (fetchError) {
+        console.error('Fetch fallback also failed:', fetchError);
+        throw new Error(`Both Playwright and fetch failed. Playwright: ${playwrightError instanceof Error ? playwrightError.message : String(playwrightError)}. Fetch: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`);
+      }
+    }
 
     // Parse symbols from the markdown/html content
     // Look for patterns like DXH26, 6EH26, etc. (currency futures symbols)

@@ -19,6 +19,7 @@ import { CURRENCIES } from './CurrencySelector';
 import { useCurrencyOptions } from '@/hooks/useCurrencyOptions';
 import { generateMaturities, formatMaturity } from '@/lib/utils/contractUtils';
 import { useState } from 'react';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 export interface OptionData {
   strike: string;
@@ -42,11 +43,15 @@ export function OptionsTable({ currencyId, onBack }: OptionsTableProps) {
   // Default to first available maturity
   const [selectedMaturity, setSelectedMaturity] = useState(maturities[0] || null);
   
-  // Fetch options data
+  // State for option type tab (Call or Put)
+  const [activeOptionType, setActiveOptionType] = useState<'C' | 'P'>('C');
+  
+  // Fetch options data for the selected type
   const { data: options, isLoading, isError, error } = useCurrencyOptions(
     currencyId,
     selectedMaturity?.monthCode || null,
-    selectedMaturity?.year || null
+    selectedMaturity?.year || null,
+    activeOptionType
   );
 
   return (
@@ -101,101 +106,197 @@ export function OptionsTable({ currencyId, onBack }: OptionsTableProps) {
         )}
       </div>
 
-      {/* Loading State */}
-      {isLoading && (
-        <div className="glass-card rounded-lg overflow-hidden">
-          <div className="p-6">
-            {Array.from({ length: 6 }).map((_, i) => (
-              <div key={i} className="flex items-center gap-4 py-3 border-b border-border last:border-0">
-                <div className="shimmer h-5 w-24 rounded" />
-                <div className="shimmer h-5 w-16 rounded" />
-                <div className="shimmer h-5 w-32 rounded flex-1" />
-                <div className="shimmer h-5 w-20 rounded" />
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Option Type Tabs (Call/Put) */}
+      <Tabs value={activeOptionType} onValueChange={(value) => setActiveOptionType(value as 'C' | 'P')} className="w-full">
+        <TabsList className="grid w-full max-w-md grid-cols-2">
+          <TabsTrigger value="C">Call Options</TabsTrigger>
+          <TabsTrigger value="P">Put Options</TabsTrigger>
+        </TabsList>
 
-      {/* Error State */}
-      {isError && (
-        <div className="glass-card rounded-lg p-8 text-center">
-          <p className="text-destructive mb-2 font-semibold">
-            Erreur lors du chargement des options
-          </p>
-          <p className="text-muted-foreground text-sm">
-            {error?.message || 'Une erreur est survenue. Veuillez réessayer.'}
-          </p>
-        </div>
-      )}
-
-      {/* Options Table */}
-      {!isLoading && !isError && (
-        <>
-          {options && options.length === 0 ? (
-            <div className="glass-card rounded-lg p-8 text-center">
-              <p className="text-muted-foreground">
-                Aucune option trouvée pour cette maturité. Les données peuvent être en cours de chargement.
-              </p>
-            </div>
-          ) : (
+        <TabsContent value="C" className="mt-4">
+          {/* Loading State */}
+          {isLoading && (
             <div className="glass-card rounded-lg overflow-hidden">
-              <Table>
-                <TableHeader>
-                  <TableRow className="border-border hover:bg-transparent">
-                    <TableHead className="font-mono text-xs uppercase tracking-wider text-muted-foreground">
-                      Strike
-                    </TableHead>
-                    <TableHead className="font-mono text-xs uppercase tracking-wider text-muted-foreground text-center">
-                      Type
-                    </TableHead>
-                    <TableHead className="font-mono text-xs uppercase tracking-wider text-muted-foreground text-right">
-                      Latest
-                    </TableHead>
-                    <TableHead className="font-mono text-xs uppercase tracking-wider text-muted-foreground text-right">
-                      IV
-                    </TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {options?.map((option, index) => (
-                    <TableRow
-                      key={`${option.strike}-${option.type}-${index}`}
-                      className="data-row border-border animate-fade-in"
-                      style={{ animationDelay: `${index * 10}ms` }}
-                    >
-                      <TableCell className="font-mono font-semibold text-primary">
-                        {option.strike}
-                      </TableCell>
-                      <TableCell className="text-center">
-                        <span
-                          className={`inline-flex items-center px-2 py-1 rounded text-xs font-semibold ${
-                            option.type === 'C'
-                              ? 'bg-green-500/20 text-green-400'
-                              : 'bg-red-500/20 text-red-400'
-                          }`}
-                        >
-                          {option.type === 'C' ? 'Call' : 'Put'}
-                        </span>
-                      </TableCell>
-                      <TableCell className="font-mono text-right tabular-nums text-foreground">
-                        {option.latest}
-                      </TableCell>
-                      <TableCell className="font-mono text-right tabular-nums text-foreground">
-                        {option.iv}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+              <div className="p-6">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="flex items-center gap-4 py-3 border-b border-border last:border-0">
+                    <div className="shimmer h-5 w-24 rounded" />
+                    <div className="shimmer h-5 w-16 rounded" />
+                    <div className="shimmer h-5 w-32 rounded flex-1" />
+                    <div className="shimmer h-5 w-20 rounded" />
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
-          <p className="text-sm text-muted-foreground text-center">
-            {options?.length || 0} option{options && options.length > 1 ? 's' : ''} disponible{options && options.length > 1 ? 's' : ''}
-          </p>
-        </>
-      )}
+          {/* Error State */}
+          {isError && (
+            <div className="glass-card rounded-lg p-8 text-center">
+              <p className="text-destructive mb-2 font-semibold">
+                Erreur lors du chargement des options Call
+              </p>
+              <p className="text-muted-foreground text-sm">
+                {error?.message || 'Une erreur est survenue. Veuillez réessayer.'}
+              </p>
+            </div>
+          )}
+
+          {/* Options Table */}
+          {!isLoading && !isError && (
+            <>
+              {options && options.length === 0 ? (
+                <div className="glass-card rounded-lg p-8 text-center">
+                  <p className="text-muted-foreground">
+                    Aucune option Call trouvée pour cette maturité. Les données peuvent être en cours de chargement.
+                  </p>
+                </div>
+              ) : (
+                <div className="glass-card rounded-lg overflow-hidden">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="border-border hover:bg-transparent">
+                        <TableHead className="font-mono text-xs uppercase tracking-wider text-muted-foreground">
+                          Strike
+                        </TableHead>
+                        <TableHead className="font-mono text-xs uppercase tracking-wider text-muted-foreground text-center">
+                          Type
+                        </TableHead>
+                        <TableHead className="font-mono text-xs uppercase tracking-wider text-muted-foreground text-right">
+                          Latest
+                        </TableHead>
+                        <TableHead className="font-mono text-xs uppercase tracking-wider text-muted-foreground text-right">
+                          IV
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {options?.map((option, index) => (
+                        <TableRow
+                          key={`${option.strike}-${option.type}-${index}`}
+                          className="data-row border-border animate-fade-in"
+                          style={{ animationDelay: `${index * 10}ms` }}
+                        >
+                          <TableCell className="font-mono font-semibold text-primary">
+                            {option.strike}
+                          </TableCell>
+                          <TableCell className="text-center">
+                            <span className="inline-flex items-center px-2 py-1 rounded text-xs font-semibold bg-green-500/20 text-green-400">
+                              Call
+                            </span>
+                          </TableCell>
+                          <TableCell className="font-mono text-right tabular-nums text-foreground">
+                            {option.latest}
+                          </TableCell>
+                          <TableCell className="font-mono text-right tabular-nums text-foreground">
+                            {option.iv}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+
+              <p className="text-sm text-muted-foreground text-center mt-4">
+                {options?.length || 0} option{options && options.length > 1 ? 's' : ''} Call disponible{options && options.length > 1 ? 's' : ''}
+              </p>
+            </>
+          )}
+        </TabsContent>
+
+        <TabsContent value="P" className="mt-4">
+          {/* Loading State */}
+          {isLoading && (
+            <div className="glass-card rounded-lg overflow-hidden">
+              <div className="p-6">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="flex items-center gap-4 py-3 border-b border-border last:border-0">
+                    <div className="shimmer h-5 w-24 rounded" />
+                    <div className="shimmer h-5 w-16 rounded" />
+                    <div className="shimmer h-5 w-32 rounded flex-1" />
+                    <div className="shimmer h-5 w-20 rounded" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Error State */}
+          {isError && (
+            <div className="glass-card rounded-lg p-8 text-center">
+              <p className="text-destructive mb-2 font-semibold">
+                Erreur lors du chargement des options Put
+              </p>
+              <p className="text-muted-foreground text-sm">
+                {error?.message || 'Une erreur est survenue. Veuillez réessayer.'}
+              </p>
+            </div>
+          )}
+
+          {/* Options Table */}
+          {!isLoading && !isError && (
+            <>
+              {options && options.length === 0 ? (
+                <div className="glass-card rounded-lg p-8 text-center">
+                  <p className="text-muted-foreground">
+                    Aucune option Put trouvée pour cette maturité. Les données peuvent être en cours de chargement.
+                  </p>
+                </div>
+              ) : (
+                <div className="glass-card rounded-lg overflow-hidden">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="border-border hover:bg-transparent">
+                        <TableHead className="font-mono text-xs uppercase tracking-wider text-muted-foreground">
+                          Strike
+                        </TableHead>
+                        <TableHead className="font-mono text-xs uppercase tracking-wider text-muted-foreground text-center">
+                          Type
+                        </TableHead>
+                        <TableHead className="font-mono text-xs uppercase tracking-wider text-muted-foreground text-right">
+                          Latest
+                        </TableHead>
+                        <TableHead className="font-mono text-xs uppercase tracking-wider text-muted-foreground text-right">
+                          IV
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {options?.map((option, index) => (
+                        <TableRow
+                          key={`${option.strike}-${option.type}-${index}`}
+                          className="data-row border-border animate-fade-in"
+                          style={{ animationDelay: `${index * 10}ms` }}
+                        >
+                          <TableCell className="font-mono font-semibold text-primary">
+                            {option.strike}
+                          </TableCell>
+                          <TableCell className="text-center">
+                            <span className="inline-flex items-center px-2 py-1 rounded text-xs font-semibold bg-red-500/20 text-red-400">
+                              Put
+                            </span>
+                          </TableCell>
+                          <TableCell className="font-mono text-right tabular-nums text-foreground">
+                            {option.latest}
+                          </TableCell>
+                          <TableCell className="font-mono text-right tabular-nums text-foreground">
+                            {option.iv}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+
+              <p className="text-sm text-muted-foreground text-center mt-4">
+                {options?.length || 0} option{options && options.length > 1 ? 's' : ''} Put disponible{options && options.length > 1 ? 's' : ''}
+              </p>
+            </>
+          )}
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

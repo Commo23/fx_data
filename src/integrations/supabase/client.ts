@@ -9,13 +9,22 @@ const SUPABASE_PUBLISHABLE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 // import { supabase } from "@/integrations/supabase/client";
 
 if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
+  const missing = [];
+  if (!SUPABASE_URL) missing.push('VITE_SUPABASE_URL');
+  if (!SUPABASE_PUBLISHABLE_KEY) missing.push('VITE_SUPABASE_PUBLISHABLE_KEY');
+  
   console.error('Missing Supabase environment variables:', {
     url: SUPABASE_URL ? '✓' : '✗',
     key: SUPABASE_PUBLISHABLE_KEY ? '✓' : '✗'
   });
+  
+  throw new Error(
+    `Missing required environment variables: ${missing.join(', ')}. ` +
+    `Please configure them in your Vercel project settings or .env file.`
+  );
 }
 
-export const supabase = createClient<Database>(SUPABASE_URL || '', SUPABASE_PUBLISHABLE_KEY || '', {
+export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: {
     storage: localStorage,
     persistSession: true,

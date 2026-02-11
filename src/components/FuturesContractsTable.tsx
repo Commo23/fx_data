@@ -109,7 +109,7 @@ export function FuturesContractsTable({
             {error?.message || 'Une erreur est survenue. Veuillez réessayer.'}
           </p>
           <p className="text-muted-foreground text-xs mt-4">
-            Vérifiez que les variables d'environnement Supabase sont configurées et que la clé API Firecrawl est définie.
+            Vérifiez que les variables d'environnement Supabase sont configurées.
           </p>
         </div>
       ) : contracts.length === 0 ? (
