@@ -1,11 +1,8 @@
-[phases.setup]
-nixPkgs = ["nodejs-20_x"]
+# Nixpacks will automatically detect Node.js from package.json
+# We just need to specify the install and start commands
 
 [phases.install]
 cmds = ["npm ci"]
-
-# Note: We don't build the frontend here, only install dependencies
-# The server runs directly with tsx
 
 [start]
 cmd = "npm run server"
