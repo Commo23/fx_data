@@ -109,7 +109,7 @@ export function FuturesContractsTable({
             {error?.message || 'Une erreur est survenue. Veuillez réessayer.'}
           </p>
           <p className="text-muted-foreground text-xs mt-4">
-            Vérifiez que les variables d'environnement Supabase sont configurées.
+            Vérifiez que le serveur API est accessible et que VITE_API_URL est configuré.
           </p>
         </div>
       ) : contracts.length === 0 ? (

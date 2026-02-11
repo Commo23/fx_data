@@ -1,4 +1,4 @@
-// API base URL - use Node.js server instead of Supabase Edge Functions
+// API base URL - Node.js server endpoint
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
 
 export interface CurrencyFuture {

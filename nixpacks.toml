@@ -1,5 +1,5 @@
-# Nixpacks will automatically detect Node.js from package.json
-# We just need to specify the install and start commands
+# Force Node.js 20 for Railway
+# Nixpacks will use Node.js 20 from .nvmrc or .node-version
 
 [phases.install]
 cmds = ["npm ci"]

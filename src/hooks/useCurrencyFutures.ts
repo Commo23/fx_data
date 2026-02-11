@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { FuturesContract } from '@/components/FuturesContractsTable';
-import { supabase } from '@/integrations/supabase/client';
+
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
 
 export function useCurrencyFutures(currencyId: string | null) {
   return useQuery({
@@ -11,14 +12,19 @@ export function useCurrencyFutures(currencyId: string | null) {
       console.log('Fetching futures for currency:', currencyId);
       
       try {
-        const { data, error } = await supabase.functions.invoke('scrape-forex-prices', {
-          body: { symbol: currencyId },
+        const response = await fetch(`${API_BASE_URL}/scrape-forex-prices`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ symbol: currencyId }),
         });
         
-        if (error) {
-          console.error('Supabase function error:', error);
-          throw new Error(error.message || 'Failed to invoke Supabase function');
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
+        
+        const data = await response.json();
         
         if (!data || !data.success) {
           console.error('Scraping failed:', data);
